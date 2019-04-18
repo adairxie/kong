@@ -18,11 +18,10 @@ local balancer     = require "kong.runloop.balancer"
 local mesh         = require "kong.runloop.mesh"
 local constants    = require "kong.constants"
 local singletons   = require "kong.singletons"
-local certificate  = require "kong.runloop.certificate"
 local concurrency  = require "kong.concurrency"
 local declarative  = require "kong.db.declarative"
 local certificate  = require "kong.runloop.certificate"
-local ngx_re       = require "ngx.re"
+local BasePlugin   = require "kong.plugins.base_plugin"
 
 
 local kong         = kong
@@ -74,6 +73,7 @@ local NOTICE       = ngx.NOTICE
 local SERVER_HEADER = meta._SERVER_TOKENS
 local CACHE_OPTS = { ttl = 0 }
 local SUBSYSTEMS = constants.PROTOCOLS_WITH_SUBSYSTEM
+local HEADERS = constants.HEADERS
 local EMPTY_T = {}
 local WORKER_ID
 
@@ -882,6 +882,25 @@ do
       combos = {},
     }
 
+    if subsystem == "stream" then
+      new_plugins.phases = {
+        init_worker = {},
+        preread     = {},
+        log         = {},
+      }
+
+    else
+      new_plugins.phases = {
+        init_worker   = {},
+        certificate   = {},
+        rewrite       = {},
+        access        = {},
+        header_filter = {},
+        body_filter   = {},
+        log           = {},
+      }
+    end
+
     local counter = 0
 
     for plugin, err in kong.db.plugins:each(1000) do
@@ -929,6 +948,21 @@ do
       end
 
       counter = counter + 1
+    end
+
+    for _, plugin in ipairs(loaded_plugins) do
+      if new_plugins.combos[plugin.name] then
+        for phase_name, phase in pairs(new_plugins.phases) do
+          if plugin.handler[phase_name] ~= BasePlugin[phase_name] then
+            phase[plugin.name] = true
+          end
+        end
+
+      else
+        if plugin.handler.init_worker ~= BasePlugin.init_worker then
+          new_plugins.phases.init_worker[plugin.name] = true
+        end
+      end
     end
 
     plugins_version = version
@@ -1624,8 +1658,8 @@ return {
         header["Trailer"] = nil
       end
 
-      local upstream_status_header = constants.HEADERS.UPSTREAM_STATUS
-      if singletons.configuration.enabled_headers[upstream_status_header] then
+      local upstream_status_header = HEADERS.UPSTREAM_STATUS
+      if kong.configuration.enabled_headers[upstream_status_header] then
         header[upstream_status_header] = tonumber(sub(var.upstream_status or "", -3))
         if not header[upstream_status_header] then
           log(ERR, "failed to set ", upstream_status_header, " header")
